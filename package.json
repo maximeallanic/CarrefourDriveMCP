@@ -1,7 +1,7 @@
 {
   "name": "carrefour-drive-mcp",
   "version": "2.0.0",
-  "description": "Standalone MCP server for the Carrefour Drive (carrefour.fr) private API — 43 endpoints served by a generic executor, no external runner required",
+  "description": "Standalone MCP server for the Carrefour Drive (carrefour.fr) private API — 43 endpoints served by a generic executor, driven through a real Chromium to get past Cloudflare",
   "main": "dist/index.js",
   "type": "module",
   "bin": {
@@ -18,7 +18,8 @@
     "dev": "tsc --watch",
     "test": "npm run build && node --test 'dist/__tests__/*.test.js'",
     "smoke": "npm run build && node scripts/smoke.mjs",
-    "verify": "npm run build && node --test 'dist/__tests__/*.test.js' && node scripts/smoke.mjs"
+    "verify": "npm run build && node --test 'dist/__tests__/*.test.js' && node scripts/smoke.mjs",
+    "postinstall": "playwright install chromium"
   },
   "keywords": [
     "mcp",
@@ -38,19 +39,12 @@
     "dotenv": "^16.4.5",
     "tough-cookie": "^4.1.4",
     "zod": "^3.24.0",
-    "winston": "^3.13.0"
+    "winston": "^3.13.0",
+    "playwright": "^1.50.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "@types/tough-cookie": "^4.0.5",
     "typescript": "^5.8.0"
-  },
-  "peerDependencies": {
-    "playwright": "^1.50.0"
-  },
-  "peerDependenciesMeta": {
-    "playwright": {
-      "optional": true
-    }
   }
 }

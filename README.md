@@ -2,14 +2,15 @@
 
 Serveur **MCP autonome** pour l'API privée de **Carrefour Drive** (`www.carrefour.fr`).
 
-46 outils exposés : **43 endpoints** décrits dans `tools/*.json` (extraits de trafic réel)
-et exécutés par un **moteur générique**, plus 3 outils de gestion de session.
+48 outils exposés : **43 endpoints** décrits dans `tools/*.json` (extraits de trafic réel)
+et exécutés par un **moteur générique**, plus 5 outils de gestion de session.
 
 > **Spectral n'est plus requis.** Les anciennes versions de ce projet passaient par le binaire
 > externe `spectral` (`spectral mcp stdio`, `spectral auth login`) pour interpréter les
 > définitions d'outils. Ce dépôt embarque désormais son propre exécuteur : `npm install &&
-> npm run build && node dist/index.js` suffit. **Playwright n'est pas requis non plus** —
-> c'est une dépendance optionnelle utilisée uniquement si vous voulez un login navigateur.
+> npm run build && node dist/index.js` suffit. Playwright, en revanche, est désormais une
+> dépendance **obligatoire** : c'est le transport, pas un confort — voir
+> [Transport](#transport--tout-passe-par-un-vrai-chromium).
 
 ## Installation
 
@@ -47,62 +48,97 @@ claude mcp add carrefour-drive -- node /chemin/absolu/CarrefourDriveMCP/dist/ind
 }
 ```
 
+## Transport : tout passe par un vrai Chromium
+
+carrefour.fr est protégé par un *managed challenge* Cloudflare qui prend les empreintes du
+client. Mesuré depuis une même IP, le même jour :
+
+| Client | `GET /api/cart` |
+| --- | --- |
+| `fetch` (undici) | `403 cf-mitigated: challenge`, **dès la première requête** |
+| `curl` | `200` quelques appels, puis `403` |
+| Chrome | `200` |
+
+Aucun bricolage d'en-têtes n'y change quoi que ce soit : le seul transport viable est un
+navigateur. Et les requêtes doivent être émises **depuis une page** — l'`APIRequestContext`
+de Playwright utilise une pile HTTP Node et se fait bloquer comme `fetch`.
+
+Le serveur maintient donc un Chromium persistant et exécute chaque appel d'API en `fetch`
+dans une page garée sur l'origine visée (une page par origine, CORS oblige). Il tourne
+**sans fenêtre**, mais pas en mode headless standard :
+
+| Lancement | Résultat |
+| --- | --- |
+| `headless: true` (headless shell) | `403` — l'UA annonce `HeadlessChrome` |
+| `headless: false` | `200` |
+| `channel: 'chromium'` + UA masqué + `--disable-blink-features=AutomationControlled` | `200`, `navigator.webdriver` à `false` |
+
+C'est la dernière ligne qui est utilisée.
+
 ## Authentification
 
-L'API de carrefour.fr s'authentifie **par cookies de session**. Il n'y a pas de clé d'API :
-vous devez fournir vos propres cookies, obtenus depuis un navigateur où vous êtes connecté.
+carrefour.fr s'authentifie par cookies, derrière deux systèmes distincts :
 
-### Récupérer ses cookies
+| Domaine | Rôle | Durée de vie |
+| --- | --- | --- |
+| `moncompte.carrefour.fr` | SSO ForgeRock, cookie **`c4iamsecuretk`** | 24 h max, meurt après **60 min d'inactivité** |
+| `www.carrefour.fr` | session boutique (cookies `HttpOnly`) | courte, renouvelable |
 
-1. Connectez-vous sur <https://www.carrefour.fr> et sélectionnez votre magasin Drive.
-2. Ouvrez les DevTools (`F12`) → onglet **Application** (Chrome) ou **Stockage** (Firefox)
-   → **Cookies** → `https://www.carrefour.fr`.
-3. Copiez les cookies. Trois formats sont acceptés :
-   - en-tête brut : `sessionid=abc; autre=def`
-   - objet JSON : `{"sessionid": "abc", "autre": "def"}`
-   - tableau JSON exporté par Playwright / EditThisCookie :
-     `[{"name":"sessionid","value":"abc","domain":".carrefour.fr","path":"/"}]`
+### Se connecter
 
-   Astuce Chrome : dans la console, `document.cookie` renvoie directement l'en-tête brut
-   (attention, les cookies `HttpOnly` en sont absents — préférez l'onglet Application).
+`carrefour_browser_login` ouvre une fenêtre que **vous** pilotez, puis récupère la session.
+Deux contraintes en dictent le fonctionnement :
 
-### Fournir ses cookies
+- le formulaire est derrière un captcha **Cloudflare Turnstile**, qui refuse de se valider
+  dans un navigateur piloté par CDP — la fenêtre est donc un Chromium ordinaire, avec un
+  port de debug ouvert mais **rien d'attaché** tant que le login n'est pas terminé ;
+- `c4iamsecuretk` est un cookie **de session** : Chromium ne l'écrit jamais sur disque, et
+  les cookies qu'il persiste sont chiffrés avec une clé du trousseau système qu'un autre
+  lancement ne retrouve pas forcément. Attendre la fermeture de la fenêtre détruirait donc
+  précisément ce qu'on cherche à capturer.
 
-Trois moyens, par ordre de priorité de chargement (les derniers écrasent les premiers) :
+Le serveur surveille l'onglet via une simple requête HTTP sur `/json/list` (aucun domaine
+CDP activé, donc aucune trace d'automatisation), et dès que la boucle OAuth retombe sur la
+boutique, il s'attache, lit les cookies **en mémoire** et les range dans le jar persistant.
+Il ferme la fenêtre lui-même : **ne la fermez pas**.
 
-| Moyen | Quand l'utiliser |
-| --- | --- |
-| Fichier de session persistant `data/sessions/cookies.json` | rempli automatiquement, rien à faire |
-| `CARREFOUR_COOKIE_FILE=/chemin/cookies.json` | export JSON depuis le navigateur |
-| `CARREFOUR_COOKIES="a=1; b=2"` | variable d'env / `.env` |
-| Outil MCP `carrefour_set_cookies` | à chaud, depuis la conversation |
+Le jar `tough-cookie` (`data/sessions/cookies.json`, permissions `0600`) est le stockage
+durable de la session ; il réinjecte tout dans le profil du navigateur à chaque démarrage.
 
-Le jar est géré par [`tough-cookie`](https://github.com/salesforce/tough-cookie) : les
-attributs `Domain`/`Path`/`Expires` sont respectés, les en-têtes `Set-Cookie` des réponses
-sont réinjectés automatiquement, et le jar est persisté dans
-`data/sessions/cookies.json` (permissions `0600`, ignoré par git).
+### Renouvellement automatique
+
+Tant que le cookie SSO vit, la session boutique se reconstruit sans aucune interaction :
+
+```
+GET moncompte.carrefour.fr/iam/oauth2/CarrefourConnect/authorize?client_id=…&redirect_uri=https://www.carrefour.fr/login/check
+  └─302─► www.carrefour.fr/login/check?code=…   (le BFF échange le code)
+      └─302─► www.carrefour.fr/                  (nouveaux cookies de session)
+```
+
+C'est une simple navigation : Chromium suit les redirections et pose les cookies lui-même.
+Le serveur la déclenche **tout seul** :
+
+- avant une requête authentifiée s'il n'a aucun cookie boutique utilisable ;
+- après un `401`/`403`, en rejouant la requête une fois ;
+- toutes les 30 min via un keep-alive, sans quoi les 60 min d'inactivité du SSO tueraient
+  la session entre deux sollicitations (`CARREFOUR_KEEPALIVE_MINUTES=0` pour désactiver).
+
+Quand le SSO lui-même a expiré, aucune reconnexion silencieuse n'est possible : les outils
+renvoient une erreur explicite demandant un nouveau `carrefour_browser_login`.
 
 ### Outils de session
 
 | Outil | Rôle |
 | --- | --- |
-| `carrefour_set_cookies` | enregistrer / mettre à jour la session |
-| `carrefour_session_status` | afficher les cookies stockés ; `verify: true` fait un appel réel pour tester la validité |
+| `carrefour_browser_login` | ouvrir une fenêtre pour se connecter (captcha + OTP) |
+| `carrefour_session_status` | cookies stockés, profil navigateur, durée de vie restante du SSO ; `verify: true` fait un appel réel |
+| `carrefour_refresh_session` | forcer un renouvellement (rarement utile : c'est automatique) |
+| `carrefour_set_cookies` | importer des cookies à la main (header, JSON map, ou tableau JSON) |
 | `carrefour_clear_session` | effacer la session locale |
-| `carrefour_browser_login` | **optionnel**, exposé uniquement si `playwright` est installé |
 
-Si la session manque ou a expiré (HTTP 401/403), les outils renvoient une erreur explicite
-rappelant les trois façons de fournir des cookies — jamais un échec silencieux.
-
-### Login navigateur (optionnel)
-
-```sh
-npm install playwright && npx playwright install chromium
-```
-
-L'outil `carrefour_browser_login` apparaît alors dans la liste : il ouvre un vrai navigateur,
-vous laisse vous connecter (ou remplit email/mot de passe), puis importe les cookies dans le
-jar. **Ce n'est jamais nécessaire** : tout fonctionne avec `carrefour_set_cookies`.
+Pour `carrefour_set_cookies`, seul le format tableau JSON transporte le domaine : c'est le
+seul utilisable pour fournir `c4iamsecuretk`, sans lequel le renouvellement automatique est
+impossible.
 
 ## Comment ça marche
 
@@ -154,6 +190,11 @@ Voir `.env.example`. Variables principales :
 | `CARREFOUR_COOKIES` | — | cookies de session (header, JSON map ou JSON array) |
 | `CARREFOUR_COOKIE_FILE` | — | chemin d'un export JSON de cookies |
 | `CARREFOUR_SESSION_FILE` | `data/sessions/cookies.json` | emplacement du jar persisté |
+| `CARREFOUR_BROWSER_PROFILE` | `data/browser-profile` | profil Chromium persistant |
+| `CARREFOUR_KEEPALIVE_MINUTES` | `30` | période du keep-alive SSO ; `0` désactive |
+| `CARREFOUR_OAUTH_CLIENT_ID` | `carrefour_onecarrefour_web` | client OAuth2 utilisé pour le refresh |
+| `CARREFOUR_OAUTH_REDIRECT_URI` | `https://www.carrefour.fr/login/check` | callback du BFF |
+| `CARREFOUR_OAUTH_SCOPE` | `openid iam` | scopes demandés |
 | `CARREFOUR_TOOLS_DIR` | `<projet>/tools` | dossier des définitions JSON |
 | `CARREFOUR_MAX_RESPONSE_CHARS` | `60000` | troncature des réponses volumineuses |
 | `REQUEST_TIMEOUT_MS` | `30000` | timeout HTTP |

@@ -1,8 +1,22 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { sessionService, NO_SESSION_MESSAGE, CARREFOUR_ORIGIN } from '../services/session.service.js';
+import {
+  sessionService,
+  NO_SESSION_MESSAGE,
+  CARREFOUR_ORIGIN,
+  IAM_ORIGIN,
+  SSO_COOKIE_NAME,
+} from '../services/session.service.js';
 import { httpService } from '../services/http.service.js';
+import { refreshSession, ssoStatus } from '../services/auth.service.js';
 import { browserLogin, isPlaywrightAvailable } from '../services/browser-login.js';
+import { browserService } from '../services/browser.service.js';
+
+function humanDuration(seconds: number): string {
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  return h > 0 ? `${h} h ${m} min` : `${m} min`;
+}
 
 function text(body: string, isError = false) {
   return { content: [{ type: 'text' as const, text: body }], isError };
@@ -26,8 +40,13 @@ export function registerSessionTools(server: McpServer): void {
         return text('No usable cookie found in the provided value.', true);
       }
       const status = sessionService.status();
+      const sso = status.sso
+        ? `IAM SSO cookie (${SSO_COOKIE_NAME}) present: the session can renew itself automatically.`
+        : `No '${SSO_COOKIE_NAME}' cookie (moncompte.carrefour.fr) — the session cannot renew itself, ` +
+          'and you will have to sign in again by hand once it expires.';
       return text(
-        `Stored ${stored} cookie(s). Session file: ${status.sessionFile}\nCookies: ${status.cookies.join(', ')}`
+        `Stored ${stored} cookie(s). Session file: ${status.sessionFile}\n` +
+          `Cookies: ${status.cookies.join(', ')}\n${sso}`
       );
     }
   );
@@ -43,9 +62,25 @@ export function registerSessionTools(server: McpServer): void {
     },
     async ({ verify }) => {
       const status = sessionService.status();
-      if (!status.authenticated) return text(NO_SESSION_MESSAGE, true);
+      if (!status.authenticated && !status.sso) return text(NO_SESSION_MESSAGE, true);
 
-      let line = `Session present: ${status.cookieCount} cookie(s) [${status.cookies.join(', ')}]\nFile: ${status.sessionFile}`;
+      const browser = browserService.describe();
+      let line =
+        `Session present: ${status.cookieCount} cookie(s) [${status.cookies.join(', ')}]\n` +
+        `File: ${status.sessionFile}\nBrowser profile: ${browser.profile} (${browser.running ? 'running' : 'stopped'})`;
+
+      const sso = await ssoStatus();
+      if (!sso.present) {
+        line += `\nIAM SSO: absent — no automatic renewal, expect a manual login when the session dies.`;
+      } else if (sso.secondsLeft !== undefined) {
+        line +=
+          `\nIAM SSO: valid for ${humanDuration(sso.secondsLeft)}` +
+          (sso.maxIdleMinutes ? `, dies after ${sso.maxIdleMinutes} min idle` : '') +
+          ' — the session renews itself until then.';
+      } else {
+        line += `\nIAM SSO: cookie stored, but ${IAM_ORIGIN} did not confirm it is still valid.`;
+      }
+
       if (verify) {
         try {
           const result = await httpService.send({
@@ -65,7 +100,21 @@ export function registerSessionTools(server: McpServer): void {
     }
   );
 
+  server.tool(
+    'carrefour_refresh_session',
+    'Force a renewal of the www.carrefour.fr session from the stored IAM SSO cookie. ' +
+      'Rarely needed by hand: authenticated requests already refresh and retry on their own.',
+    {},
+    async () => {
+      const result = await refreshSession();
+      if (!result.ok) return text(result.message, true);
+      const status = sessionService.status();
+      return text(`${result.message}\nCookies now held for ${CARREFOUR_ORIGIN}: ${status.cookies.join(', ')}`);
+    }
+  );
+
   server.tool('carrefour_clear_session', 'Delete the locally stored Carrefour cookies.', {}, async () => {
+    await browserService.close();
     sessionService.clear();
     return text('Session cleared. Provide cookies again with carrefour_set_cookies before using account tools.');
   });
@@ -74,16 +123,14 @@ export function registerSessionTools(server: McpServer): void {
   if (isPlaywrightAvailable()) {
     server.tool(
       'carrefour_browser_login',
-      'OPTIONAL. Opens a real browser (Playwright) to log into carrefour.fr and captures the session cookies. ' +
-        'Not required — carrefour_set_cookies works without any browser.',
-      {
-        email: z.string().optional().describe('Account email. Omit to log in manually in the opened window.'),
-        password: z.string().optional().describe('Account password. Omit to log in manually.'),
-        headless: z.boolean().optional().describe('Run without a visible window (default: false).'),
-      },
-      async ({ email, password, headless }) => {
+      'Opens a browser window on the server profile so you can sign in to carrefour.fr. ' +
+        'Finish the captcha and the emailed OTP, then close the window: the session — including the ' +
+        'IAM SSO cookie that lets the server renew itself — stays in the profile. ' +
+        'The login cannot be automated: Cloudflare Turnstile refuses to validate in a driven browser.',
+      {},
+      async () => {
         try {
-          return text(await browserLogin({ email, password, headless }));
+          return text(await browserLogin({}));
         } catch (error) {
           return text(`Browser login failed: ${(error as Error).message}`, true);
         }

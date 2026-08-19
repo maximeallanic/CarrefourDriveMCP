@@ -5,6 +5,8 @@ import { config } from 'dotenv';
 import { registerSpecTools } from './spec/register.js';
 import { loadToolSpecs } from './spec/loader.js';
 import { registerSessionTools } from './tools/session.tools.js';
+import { startKeepAlive } from './services/auth.service.js';
+import { browserService } from './services/browser.service.js';
 import { logger } from './utils/logger.js';
 
 config();
@@ -32,9 +34,19 @@ export function createServer(): { server: McpServer; toolCount: number } {
 
 async function main(): Promise<void> {
   const { server, toolCount } = createServer();
+  // The IAM SSO session dies after 60 min idle, which a long-running server
+  // would otherwise hit between two user requests.
+  startKeepAlive();
   const transport = new StdioServerTransport();
   await server.connect(transport);
   process.stderr.write(`[carrefour-drive] MCP server ready — ${toolCount} API tools loaded\n`);
+
+  // The browser is a child process; leaving it behind would lock the profile.
+  for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+    process.once(signal, () => {
+      browserService.close().finally(() => process.exit(0));
+    });
+  }
 }
 
 main().catch((error) => {

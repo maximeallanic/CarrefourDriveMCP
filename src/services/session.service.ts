@@ -7,6 +7,18 @@ import { logger } from '../utils/logger.js';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 export const CARREFOUR_ORIGIN = 'https://www.carrefour.fr';
+/** ForgeRock AM lives on its own host and holds the SSO session. */
+export const IAM_ORIGIN = 'https://moncompte.carrefour.fr';
+/** Name of the ForgeRock SSO cookie, from /iam/json/serverinfo/*. */
+export const SSO_COOKIE_NAME = 'c4iamsecuretk';
+
+/** Node exposes multiple `Set-Cookie` values only through `getSetCookie()`. */
+export function getSetCookies(headers: Headers): string[] {
+  const withGetter = headers as Headers & { getSetCookie?: () => string[] };
+  if (typeof withGetter.getSetCookie === 'function') return withGetter.getSetCookie();
+  const single = headers.get('set-cookie');
+  return single ? [single] : [];
+}
 
 const DEFAULT_SESSION_FILE = join(__dirname, '..', '..', 'data', 'sessions', 'cookies.json');
 
@@ -138,6 +150,36 @@ export class SessionService {
     return stored;
   }
 
+  /** The jar in Playwright's `addCookies` shape, to seed a browser profile. */
+  toPlaywrightCookies(): Array<{
+    name: string;
+    value: string;
+    domain: string;
+    path: string;
+    secure: boolean;
+    httpOnly: boolean;
+    expires?: number;
+  }> {
+    this.ensureLoaded();
+    const out = [];
+    for (const origin of [CARREFOUR_ORIGIN, IAM_ORIGIN]) {
+      for (const cookie of this.jar.getCookiesSync(origin)) {
+        const expiry = cookie.expiryTime();
+        out.push({
+          name: cookie.key,
+          value: cookie.value,
+          domain: cookie.domain ?? new URL(origin).hostname,
+          path: cookie.path ?? '/',
+          secure: cookie.secure,
+          httpOnly: cookie.httpOnly,
+          // Playwright wants seconds; -1 means "session cookie".
+          expires: Number.isFinite(expiry) ? Math.floor(expiry / 1000) : -1,
+        });
+      }
+    }
+    return out;
+  }
+
   /** Serialize the jar to disk with owner-only permissions. */
   persist(): void {
     const file = sessionFile();
@@ -178,10 +220,26 @@ export class SessionService {
     return this.getCookieHeader().length > 0;
   }
 
-  cookieNames(): string[] {
+  /** The SSO token is what lets us rebuild an expired storefront session. */
+  getSsoToken(): string | null {
+    this.ensureLoaded();
+    try {
+      const found = this.jar.getCookiesSync(IAM_ORIGIN).find((c) => c.key === SSO_COOKIE_NAME);
+      return found?.value ?? null;
+    } catch (error) {
+      logger.error('Failed to read the SSO cookie', { error: String(error) });
+      return null;
+    }
+  }
+
+  hasSso(): boolean {
+    return this.getSsoToken() !== null;
+  }
+
+  cookieNames(url: string = CARREFOUR_ORIGIN): string[] {
     this.ensureLoaded();
     return this.jar
-      .getCookiesSync(CARREFOUR_ORIGIN)
+      .getCookiesSync(url)
       .map((c) => c.key)
       .sort();
   }
@@ -199,12 +257,19 @@ export class SessionService {
     }
   }
 
-  status(): { authenticated: boolean; cookieCount: number; cookies: string[]; sessionFile: string } {
+  status(): {
+    authenticated: boolean;
+    cookieCount: number;
+    cookies: string[];
+    sso: boolean;
+    sessionFile: string;
+  } {
     const cookies = this.cookieNames();
     return {
       authenticated: cookies.length > 0,
       cookieCount: cookies.length,
       cookies,
+      sso: this.hasSso(),
       sessionFile: sessionFile(),
     };
   }
@@ -216,11 +281,15 @@ export const NO_SESSION_MESSAGE = [
   'No Carrefour session available.',
   '',
   'This tool needs an authenticated www.carrefour.fr session. Provide one of:',
-  '  1. Call the `carrefour_set_cookies` tool with your cookies (JSON map, JSON array,',
-  '     or a raw "name=value; name=value" cookie header copied from DevTools).',
-  '  2. Set CARREFOUR_COOKIES in the environment / .env file.',
-  '  3. Set CARREFOUR_COOKIE_FILE to a JSON cookie export (Playwright/EditThisCookie format).',
+  '  1. Call `carrefour_browser_login` (needs playwright) and sign in in the window that',
+  '     opens — Carrefour gates the login with a captcha and an email OTP, so this step',
+  '     cannot be automated.',
+  '  2. Call `carrefour_set_cookies` with your cookies (JSON map, JSON array, or a raw',
+  '     "name=value; name=value" cookie header copied from DevTools).',
+  '  3. Set CARREFOUR_COOKIES in the environment / .env file.',
+  '  4. Set CARREFOUR_COOKIE_FILE to a JSON cookie export (Playwright/EditThisCookie format).',
   '',
-  'How to get the cookies: log in on www.carrefour.fr, open DevTools (F12) ->',
-  'Application -> Cookies -> https://www.carrefour.fr, and copy the values.',
+  `Include the '${SSO_COOKIE_NAME}' cookie from moncompte.carrefour.fr: it is the only way the`,
+  'server can renew an expired storefront session on its own. Without it, every expiry',
+  'needs a fresh manual login.',
 ].join('\n');

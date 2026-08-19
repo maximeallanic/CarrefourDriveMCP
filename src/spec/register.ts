@@ -27,7 +27,9 @@ function render(data: unknown): string {
 
 /** Execute one declarative tool. Exported so the smoke test can drive it directly. */
 export async function executeSpec(spec: ToolSpec, args: Record<string, unknown>): Promise<ToolResult> {
-  if (spec.requires_auth && !sessionService.hasSession()) {
+  // An SSO cookie alone is enough: httpService rebuilds the storefront session
+  // before the request goes out.
+  if (spec.requires_auth && !sessionService.hasSession() && !sessionService.hasSso()) {
     return text(NO_SESSION_MESSAGE, true);
   }
 
@@ -42,8 +44,11 @@ export async function executeSpec(spec: ToolSpec, args: Record<string, unknown>)
     const result = await httpService.send(request, { withAuth: spec.requires_auth !== false });
 
     if (result.status === 401 || result.status === 403) {
+      // httpService already tried to refresh and replay this request, so
+      // reaching here means the session is really gone.
       return text(
-        `Carrefour returned ${result.status} for ${spec.name}. The session is missing or expired.\n\n${NO_SESSION_MESSAGE}`,
+        `Carrefour returned ${result.status} for ${spec.name}. The session is expired and could not be ` +
+          `renewed automatically.\n\n${NO_SESSION_MESSAGE}`,
         true
       );
     }
