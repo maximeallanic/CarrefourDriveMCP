@@ -1,10 +1,8 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, chmodSync } from 'fs';
-import { dirname, join, resolve } from 'path';
-import { fileURLToPath } from 'url';
+import { dirname, resolve } from 'path';
 import { CookieJar, Cookie } from 'tough-cookie';
 import { logger } from '../utils/logger.js';
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
+import { dataPath } from '../utils/paths.js';
 
 export const CARREFOUR_ORIGIN = 'https://www.carrefour.fr';
 /** ForgeRock AM lives on its own host and holds the SSO session. */
@@ -20,12 +18,10 @@ export function getSetCookies(headers: Headers): string[] {
   return single ? [single] : [];
 }
 
-const DEFAULT_SESSION_FILE = join(__dirname, '..', '..', 'data', 'sessions', 'cookies.json');
-
 function sessionFile(): string {
   return process.env.CARREFOUR_SESSION_FILE
     ? resolve(process.env.CARREFOUR_SESSION_FILE)
-    : DEFAULT_SESSION_FILE;
+    : dataPath('sessions', 'cookies.json');
 }
 
 export interface CookieInput {

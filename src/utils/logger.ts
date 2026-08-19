@@ -1,13 +1,11 @@
 import winston from 'winston';
 import { mkdirSync } from 'fs';
-import { join, dirname, resolve } from 'path';
-import { fileURLToPath } from 'url';
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
+import { join, resolve } from 'path';
+import { dataDir } from './paths.js';
 
 const LOG_DIR = process.env.CARREFOUR_LOG_DIR
   ? resolve(process.env.CARREFOUR_LOG_DIR)
-  : join(__dirname, '..', '..', 'data');
+  : dataDir();
 
 const transports: winston.transport[] = [];
 

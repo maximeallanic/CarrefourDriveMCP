@@ -1,7 +1,7 @@
 {
   "name": "carrefour-drive-mcp",
   "version": "2.0.0",
-  "description": "Standalone MCP server for the Carrefour Drive (carrefour.fr) private API — 43 endpoints served by a generic executor, driven through a real Chromium to get past Cloudflare",
+  "description": "MCP server for Carrefour Drive (carrefour.fr) \u2014 48 tools to search groceries, build a cart, book a Drive slot and read loyalty data from Claude, Cursor or any MCP client",
   "main": "dist/index.js",
   "type": "module",
   "bin": {
@@ -10,7 +10,8 @@
   "files": [
     "dist",
     "tools",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "build": "tsc",
@@ -19,15 +20,27 @@
     "test": "npm run build && node --test 'dist/__tests__/*.test.js'",
     "smoke": "npm run build && node scripts/smoke.mjs",
     "verify": "npm run build && node --test 'dist/__tests__/*.test.js' && node scripts/smoke.mjs",
-    "postinstall": "playwright install chromium"
+    "postinstall": "playwright install chromium",
+    "prepare": "tsc",
+    "prepublishOnly": "npm test"
   },
   "keywords": [
     "mcp",
+    "mcp-server",
     "model-context-protocol",
+    "claude",
+    "claude-desktop",
+    "claude-code",
+    "cursor",
+    "ai-agent",
     "carrefour",
-    "drive",
+    "carrefour-drive",
     "grocery",
-    "shopping"
+    "groceries",
+    "shopping",
+    "courses",
+    "drive",
+    "france"
   ],
   "author": "Maxime Allanic",
   "license": "MIT",
@@ -46,5 +59,13 @@
     "@types/node": "^22.0.0",
     "@types/tough-cookie": "^4.0.5",
     "typescript": "^5.8.0"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/maximeallanic/CarrefourDriveMCP.git"
+  },
+  "bugs": {
+    "url": "https://github.com/maximeallanic/CarrefourDriveMCP/issues"
+  },
+  "homepage": "https://github.com/maximeallanic/CarrefourDriveMCP#readme"
 }

@@ -1,11 +1,9 @@
 import { mkdirSync } from 'fs';
-import { dirname, join, resolve } from 'path';
-import { fileURLToPath } from 'url';
+import { resolve } from 'path';
 import type { BrowserContext, Page } from 'playwright';
 import { sessionService } from './session.service.js';
 import { logger } from '../utils/logger.js';
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
+import { dataPath } from '../utils/paths.js';
 
 /**
  * All Carrefour traffic goes through a real Chromium.
@@ -28,8 +26,6 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
  *
  * The last line is what this service launches: no window, and it passes.
  */
-
-const DEFAULT_PROFILE_DIR = join(__dirname, '..', '..', 'data', 'browser-profile');
 
 /** A stock Chrome UA — the default one leaks `HeadlessChrome` and gets blocked. */
 const USER_AGENT =
@@ -54,7 +50,7 @@ function parkingUrl(origin: string): string {
 export function profileDir(): string {
   return process.env.CARREFOUR_BROWSER_PROFILE
     ? resolve(process.env.CARREFOUR_BROWSER_PROFILE)
-    : DEFAULT_PROFILE_DIR;
+    : dataPath('browser-profile');
 }
 
 export interface FetchRequest {

@@ -41,24 +41,49 @@ dropping in a JSON file — no code.
 
 ## Install
 
-Node.js **20+** required (native `fetch`, `FormData`, `node:test`).
+Nothing to clone. Node.js **20+** is the only prerequisite (native `fetch`,
+`FormData`, `node:test`).
+
+```sh
+npx -y github:maximeallanic/CarrefourDriveMCP
+```
+
+That single command fetches, builds and starts the server on stdio — the first
+run also downloads the Chromium it uses as HTTP transport. Most of the time you
+never type it yourself: you put it in your MCP client config
+([next section](#connect-it-to-your-agent)) and the client runs it for you.
+
+Prefer it installed once, globally?
+
+```sh
+npm install -g github:maximeallanic/CarrefourDriveMCP
+carrefour-drive-mcp
+```
+
+Your session, browser profile and logs live in `~/.carrefour-drive-mcp`
+(`$XDG_DATA_HOME/carrefour-drive-mcp` when set), so upgrades never log you out.
+Override with `CARREFOUR_DATA_DIR`.
+
+<details>
+<summary>From source instead</summary>
 
 ```sh
 git clone https://github.com/maximeallanic/CarrefourDriveMCP.git
 cd CarrefourDriveMCP
-npm install     # also downloads the Chromium used as HTTP transport
-npm run build
+npm install     # builds, and downloads the Chromium transport
+node dist/index.js
 ```
 
-That's it — `node dist/index.js` starts the MCP server on stdio. Point your
-client at that path and you're done.
+A source checkout keeps its data in the repo's own `data/` directory.
+
+</details>
 
 ## Connect it to your agent
 
 ### Claude Code
 
 ```sh
-claude mcp add carrefour-drive -- node /absolute/path/to/CarrefourDriveMCP/dist/index.js
+claude mcp add carrefour-drive -- npx -y github:maximeallanic/CarrefourDriveMCP
 ```
 
 Then, in any session:
@@ -80,8 +105,8 @@ Edit `claude_desktop_config.json`:
 {
   "mcpServers": {
     "carrefour-drive": {
-      "command": "node",
-      "args": ["/absolute/path/to/CarrefourDriveMCP/dist/index.js"]
+      "command": "npx",
+      "args": ["-y", "github:maximeallanic/CarrefourDriveMCP"]
     }
   }
 }
@@ -89,14 +114,17 @@ Edit `claude_desktop_config.json`:
 
 Restart Claude Desktop; the Carrefour tools appear in the tools menu.
 
+> On Windows, use `"command": "cmd"` with
+> `"args": ["/c", "npx", "-y", "github:maximeallanic/CarrefourDriveMCP"]`.
+
 ### Cursor, Windsurf, Zed, VS Code and other MCP clients
 
 Any client that speaks MCP over stdio takes the same two fields:
 
 ```json
 {
-  "command": "node",
-  "args": ["/absolute/path/to/CarrefourDriveMCP/dist/index.js"]
+  "command": "npx",
+  "args": ["-y", "github:maximeallanic/CarrefourDriveMCP"]
 }
 ```
 
@@ -104,6 +132,10 @@ Any client that speaks MCP over stdio takes the same two fields:
 - **Windsurf** — `~/.codeium/windsurf/mcp_config.json`
 - **VS Code / Copilot** — `.vscode/mcp.json`, under `"servers"`
 - **Zed** — `settings.json`, under `"context_servers"`
+
+Installed globally or cloned instead? Swap in
+`{"command": "carrefour-drive-mcp"}` or
+`{"command": "node", "args": ["/absolute/path/to/dist/index.js"]}`.
 
 Already have cookies? Pass them in an `"env"` block instead of logging in:
 `{"CARREFOUR_COOKIES": "…cookie header…"}`.
@@ -139,8 +171,8 @@ a real call).
 > domain — it's the only one that can supply `c4iamsecuretk`, without which
 > automatic renewal is impossible.
 
-The cookie jar lives in `data/sessions/cookies.json` (`0600`) and is re-injected
-into the browser profile on every start.
+The cookie jar lives in `<data dir>/sessions/cookies.json` (`0600`) and is
+re-injected into the browser profile on every start.
 
 ## Tool reference
 
@@ -313,8 +345,9 @@ See `.env.example`. Main variables:
 | --- | --- | --- |
 | `CARREFOUR_COOKIES` | — | session cookies (header, JSON map or JSON array) |
 | `CARREFOUR_COOKIE_FILE` | — | path to a JSON cookie export |
-| `CARREFOUR_SESSION_FILE` | `data/sessions/cookies.json` | persisted cookie jar |
-| `CARREFOUR_BROWSER_PROFILE` | `data/browser-profile` | persistent Chromium profile |
+| `CARREFOUR_DATA_DIR` | `~/.carrefour-drive-mcp` (repo `data/` from source) | root of everything written below |
+| `CARREFOUR_SESSION_FILE` | `<data>/sessions/cookies.json` | persisted cookie jar |
+| `CARREFOUR_BROWSER_PROFILE` | `<data>/browser-profile` | persistent Chromium profile |
 | `CARREFOUR_KEEPALIVE_MINUTES` | `30` | SSO keep-alive period; `0` disables |
 | `CARREFOUR_OAUTH_CLIENT_ID` | `carrefour_onecarrefour_web` | OAuth2 client used for refresh |
 | `CARREFOUR_OAUTH_REDIRECT_URI` | `https://www.carrefour.fr/login/check` | BFF callback |
@@ -324,9 +357,11 @@ See `.env.example`. Main variables:
 | `REQUEST_TIMEOUT_MS` | `30000` | HTTP timeout |
 | `RATE_LIMIT_REQUESTS` / `RATE_LIMIT_WINDOW_MS` | `10` / `60000` | rate-limit window |
 | `MIN_DELAY_MS` / `MAX_DELAY_MS` | `100` / `500` | jitter between requests |
-| `LOG_LEVEL`, `CARREFOUR_LOG_DIR` | `info`, `data/` | winston logs (files + stderr, **never stdout**) |
+| `LOG_LEVEL`, `CARREFOUR_LOG_DIR` | `info`, `<data>` | winston logs (files + stderr, **never stdout**) |
 
 ## Verify the install
+
+From a source checkout:
 
 ```sh
 npm run build     # tsc
@@ -351,7 +386,8 @@ same private endpoints the website uses, with your own session.
 (carrefour.fr). Cloudflare may be stricter from some IPs.
 
 **Is my password stored?** No. You type it in a browser window; only cookies are
-persisted, in `data/sessions/cookies.json` with `0600` permissions. No credential
+persisted, in `~/.carrefour-drive-mcp/sessions/cookies.json` with `0600`
+permissions. No credential
 lives in this repo, and `data/` and `.env` are gitignored.
 
 **Can it place a real order?** Yes — `submit_checkout_payment` charges a real
