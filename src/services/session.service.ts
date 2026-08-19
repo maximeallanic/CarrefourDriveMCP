@@ -1,159 +1,226 @@
-import { readFile, writeFile, unlink, mkdir } from 'fs/promises';
-import { existsSync } from 'fs';
-import { join, dirname } from 'path';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, chmodSync } from 'fs';
+import { dirname, join, resolve } from 'path';
 import { fileURLToPath } from 'url';
-import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from 'crypto';
-import type { SessionCookies, StoredSession } from '../types/index.js';
+import { CookieJar, Cookie } from 'tough-cookie';
 import { logger } from '../utils/logger.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const SESSION_FILE = join(__dirname, '../../data/sessions/session.enc');
-const ENCRYPTION_KEY = process.env.SESSION_ENCRYPTION_KEY || 'carrefour-mcp-default-key-32ch';
 
-class SessionService {
-  private session: StoredSession | null = null;
-  private encryptionKey: Buffer;
+export const CARREFOUR_ORIGIN = 'https://www.carrefour.fr';
 
-  constructor() {
-    this.encryptionKey = scryptSync(ENCRYPTION_KEY, 'salt', 32);
-  }
+const DEFAULT_SESSION_FILE = join(__dirname, '..', '..', 'data', 'sessions', 'cookies.json');
 
-  private encrypt(text: string): string {
-    const iv = randomBytes(16);
-    const cipher = createCipheriv('aes-256-cbc', this.encryptionKey, iv);
-    let encrypted = cipher.update(text, 'utf8', 'hex');
-    encrypted += cipher.final('hex');
-    return iv.toString('hex') + ':' + encrypted;
-  }
+function sessionFile(): string {
+  return process.env.CARREFOUR_SESSION_FILE
+    ? resolve(process.env.CARREFOUR_SESSION_FILE)
+    : DEFAULT_SESSION_FILE;
+}
 
-  private decrypt(encryptedText: string): string {
-    const [ivHex, encrypted] = encryptedText.split(':');
-    const iv = Buffer.from(ivHex, 'hex');
-    const decipher = createDecipheriv('aes-256-cbc', this.encryptionKey, iv);
-    let decrypted = decipher.update(encrypted, 'hex', 'utf8');
-    decrypted += decipher.final('utf8');
-    return decrypted;
-  }
+export interface CookieInput {
+  name: string;
+  value: string;
+  domain?: string;
+  path?: string;
+  expires?: number | string;
+  secure?: boolean;
+  httpOnly?: boolean;
+}
 
-  async loadSession(): Promise<StoredSession | null> {
-    if (this.session) {
-      return this.session;
-    }
+/**
+ * Parse the three cookie shapes a user can realistically produce:
+ *  1. a raw `Cookie:` header  -> "a=1; b=2"
+ *  2. a JSON map              -> {"a": "1", "b": "2"}
+ *  3. a JSON array of objects -> Playwright / EditThisCookie / DevTools export
+ */
+export function parseCookieInput(input: string): CookieInput[] {
+  const trimmed = input.trim();
+  if (!trimmed) return [];
 
+  if (trimmed.startsWith('[') || trimmed.startsWith('{')) {
+    let parsed: unknown;
     try {
-      if (!existsSync(SESSION_FILE)) {
-        logger.info('No session file found');
-        return null;
-      }
-
-      const encryptedData = await readFile(SESSION_FILE, 'utf8');
-      const decrypted = this.decrypt(encryptedData);
-      this.session = JSON.parse(decrypted);
-      logger.info('Session loaded successfully');
-      return this.session;
-    } catch (error) {
-      logger.error('Failed to load session:', error);
-      return null;
+      parsed = JSON.parse(trimmed);
+    } catch {
+      parsed = null;
+    }
+    if (Array.isArray(parsed)) {
+      return parsed
+        .filter((c): c is CookieInput => !!c && typeof (c as CookieInput).name === 'string')
+        .map((c) => ({ ...c, value: String(c.value ?? '') }));
+    }
+    if (parsed && typeof parsed === 'object') {
+      return Object.entries(parsed as Record<string, unknown>).map(([name, value]) => ({
+        name,
+        value: String(value),
+      }));
     }
   }
 
-  async saveSession(session: StoredSession): Promise<void> {
+  // Fall back to a cookie header string.
+  return trimmed
+    .split(';')
+    .map((pair) => pair.trim())
+    .filter(Boolean)
+    .map((pair) => {
+      const idx = pair.indexOf('=');
+      if (idx < 0) return null;
+      return { name: pair.slice(0, idx).trim(), value: pair.slice(idx + 1).trim() };
+    })
+    .filter((c): c is CookieInput => c !== null && c.name.length > 0);
+}
+
+export class SessionService {
+  private jar = new CookieJar();
+  private loaded = false;
+
+  /** Load the persisted jar, then layer any env-provided cookies on top. */
+  private ensureLoaded(): void {
+    if (this.loaded) return;
+    this.loaded = true;
+
+    const file = sessionFile();
+    if (existsSync(file)) {
+      try {
+        this.jar = CookieJar.deserializeSync(JSON.parse(readFileSync(file, 'utf8')));
+        logger.info('Cookie jar loaded from disk', { file });
+      } catch (error) {
+        logger.error('Failed to load cookie jar, starting empty', { error: String(error) });
+        this.jar = new CookieJar();
+      }
+    }
+
+    const envFile = process.env.CARREFOUR_COOKIE_FILE;
+    if (envFile && existsSync(resolve(envFile))) {
+      try {
+        this.importCookies(readFileSync(resolve(envFile), 'utf8'), false);
+        logger.info('Cookies imported from CARREFOUR_COOKIE_FILE', { file: envFile });
+      } catch (error) {
+        logger.error('Failed to read CARREFOUR_COOKIE_FILE', { error: String(error) });
+      }
+    }
+
+    if (process.env.CARREFOUR_COOKIES) {
+      try {
+        this.importCookies(process.env.CARREFOUR_COOKIES, false);
+        logger.info('Cookies imported from CARREFOUR_COOKIES');
+      } catch (error) {
+        logger.error('Failed to parse CARREFOUR_COOKIES', { error: String(error) });
+      }
+    }
+  }
+
+  /** Add cookies from any supported input format. Returns how many were stored. */
+  importCookies(input: string, persist = true): number {
+    this.ensureLoaded();
+    const cookies = parseCookieInput(input);
+    let stored = 0;
+
+    for (const c of cookies) {
+      const domain = (c.domain || 'www.carrefour.fr').replace(/^\./, '');
+      const path = c.path || '/';
+      const cookie = new Cookie({
+        key: c.name,
+        value: c.value,
+        domain,
+        path,
+        secure: c.secure ?? true,
+        httpOnly: c.httpOnly ?? false,
+      });
+      try {
+        this.jar.setCookieSync(cookie, `https://${domain}${path}`, { ignoreError: false });
+        stored += 1;
+      } catch (error) {
+        logger.error('Rejected cookie', { name: c.name, error: String(error) });
+      }
+    }
+
+    if (persist && stored > 0) this.persist();
+    return stored;
+  }
+
+  /** Serialize the jar to disk with owner-only permissions. */
+  persist(): void {
+    const file = sessionFile();
     try {
-      const dir = dirname(SESSION_FILE);
-      if (!existsSync(dir)) {
-        await mkdir(dir, { recursive: true });
-      }
-
-      const encrypted = this.encrypt(JSON.stringify(session));
-      await writeFile(SESSION_FILE, encrypted, 'utf8');
-      this.session = session;
-      logger.info('Session saved successfully');
+      mkdirSync(dirname(file), { recursive: true });
+      writeFileSync(file, JSON.stringify(this.jar.serializeSync(), null, 2), { mode: 0o600 });
+      chmodSync(file, 0o600);
     } catch (error) {
-      logger.error('Failed to save session:', error);
-      throw new Error('Failed to save session');
+      logger.error('Failed to persist cookie jar', { error: String(error) });
     }
   }
 
-  async setCookies(cookies: SessionCookies): Promise<void> {
-    const now = new Date().toISOString();
-    const existingSession = await this.loadSession();
-
-    const session: StoredSession = {
-      cookies,
-      storeId: existingSession?.storeId,
-      storeName: existingSession?.storeName,
-      createdAt: existingSession?.createdAt || now,
-      lastUsed: now,
-    };
-
-    await this.saveSession(session);
-  }
-
-  async getCookies(): Promise<SessionCookies | null> {
-    const session = await this.loadSession();
-    return session?.cookies || null;
-  }
-
-  async getCookieString(): Promise<string> {
-    const cookies = await this.getCookies();
-    if (!cookies) {
+  getCookieHeader(url: string = CARREFOUR_ORIGIN): string {
+    this.ensureLoaded();
+    try {
+      return this.jar.getCookieStringSync(url);
+    } catch (error) {
+      logger.error('Failed to read cookies for url', { url, error: String(error) });
       return '';
     }
-
-    return Object.entries(cookies)
-      .map(([key, value]) => `${key}=${value}`)
-      .join('; ');
   }
 
-  async setStore(storeId: string, storeName: string): Promise<void> {
-    const session = await this.loadSession();
-    if (!session) {
-      throw new Error('No session found. Please set cookies first.');
-    }
-
-    session.storeId = storeId;
-    session.storeName = storeName;
-    session.lastUsed = new Date().toISOString();
-    await this.saveSession(session);
-  }
-
-  async getStore(): Promise<{ id: string; name: string } | null> {
-    const session = await this.loadSession();
-    if (!session?.storeId) {
-      return null;
-    }
-
-    return {
-      id: session.storeId,
-      name: session.storeName || '',
-    };
-  }
-
-  async clearSession(): Promise<void> {
-    try {
-      if (existsSync(SESSION_FILE)) {
-        await unlink(SESSION_FILE);
+  /** Fold `Set-Cookie` response headers back into the jar. */
+  storeSetCookies(setCookies: string[], url: string): void {
+    if (setCookies.length === 0) return;
+    this.ensureLoaded();
+    for (const raw of setCookies) {
+      try {
+        this.jar.setCookieSync(raw, url, { ignoreError: true });
+      } catch {
+        // Malformed Set-Cookie values from the site are not worth failing on.
       }
-      this.session = null;
-      logger.info('Session cleared');
-    } catch (error) {
-      logger.error('Failed to clear session:', error);
-      throw new Error('Failed to clear session');
+    }
+    this.persist();
+  }
+
+  hasSession(): boolean {
+    return this.getCookieHeader().length > 0;
+  }
+
+  cookieNames(): string[] {
+    this.ensureLoaded();
+    return this.jar
+      .getCookiesSync(CARREFOUR_ORIGIN)
+      .map((c) => c.key)
+      .sort();
+  }
+
+  clear(): void {
+    this.jar = new CookieJar();
+    this.loaded = true;
+    const file = sessionFile();
+    if (existsSync(file)) {
+      try {
+        unlinkSync(file);
+      } catch (error) {
+        logger.error('Failed to delete session file', { error: String(error) });
+      }
     }
   }
 
-  async updateLastUsed(): Promise<void> {
-    const session = await this.loadSession();
-    if (session) {
-      session.lastUsed = new Date().toISOString();
-      await this.saveSession(session);
-    }
-  }
-
-  async hasValidSession(): Promise<boolean> {
-    const cookies = await this.getCookies();
-    return cookies !== null && Object.keys(cookies).length > 0;
+  status(): { authenticated: boolean; cookieCount: number; cookies: string[]; sessionFile: string } {
+    const cookies = this.cookieNames();
+    return {
+      authenticated: cookies.length > 0,
+      cookieCount: cookies.length,
+      cookies,
+      sessionFile: sessionFile(),
+    };
   }
 }
 
 export const sessionService = new SessionService();
+
+export const NO_SESSION_MESSAGE = [
+  'No Carrefour session available.',
+  '',
+  'This tool needs an authenticated www.carrefour.fr session. Provide one of:',
+  '  1. Call the `carrefour_set_cookies` tool with your cookies (JSON map, JSON array,',
+  '     or a raw "name=value; name=value" cookie header copied from DevTools).',
+  '  2. Set CARREFOUR_COOKIES in the environment / .env file.',
+  '  3. Set CARREFOUR_COOKIE_FILE to a JSON cookie export (Playwright/EditThisCookie format).',
+  '',
+  'How to get the cookies: log in on www.carrefour.fr, open DevTools (F12) ->',
+  'Application -> Cookies -> https://www.carrefour.fr, and copy the values.',
+].join('\n');
