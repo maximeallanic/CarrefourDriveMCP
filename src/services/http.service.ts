@@ -1,167 +1,125 @@
-import type { HttpRequestConfig } from '../types/index.js';
+import type { BuiltRequest } from '../spec/types.js';
 import { sessionService } from './session.service.js';
 import { logger } from '../utils/logger.js';
 
 const DEFAULT_USER_AGENT =
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+  process.env.CARREFOUR_USER_AGENT ||
+  'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
 const RATE_LIMIT_REQUESTS = parseInt(process.env.RATE_LIMIT_REQUESTS || '10', 10);
 const RATE_LIMIT_WINDOW_MS = parseInt(process.env.RATE_LIMIT_WINDOW_MS || '60000', 10);
 const MIN_DELAY_MS = parseInt(process.env.MIN_DELAY_MS || '100', 10);
 const MAX_DELAY_MS = parseInt(process.env.MAX_DELAY_MS || '500', 10);
+const TIMEOUT_MS = parseInt(process.env.REQUEST_TIMEOUT_MS || '30000', 10);
+
+export interface HttpResult {
+  status: number;
+  statusText: string;
+  ok: boolean;
+  url: string;
+  contentType: string | null;
+  data: unknown;
+}
+
+function getSetCookies(headers: Headers): string[] {
+  const withGetter = headers as Headers & { getSetCookie?: () => string[] };
+  if (typeof withGetter.getSetCookie === 'function') return withGetter.getSetCookie();
+  const single = headers.get('set-cookie');
+  return single ? [single] : [];
+}
 
 class HttpService {
   private requestTimestamps: number[] = [];
-  private lastRequestTime: number = 0;
+  private lastRequestTime = 0;
 
-  private async waitForRateLimit(): Promise<void> {
+  private sleep(ms: number): Promise<void> {
+    return new Promise((r) => setTimeout(r, ms));
+  }
+
+  /** Simple sliding-window limiter plus a small jitter between calls. */
+  private async throttle(): Promise<void> {
     const now = Date.now();
+    this.requestTimestamps = this.requestTimestamps.filter((ts) => now - ts < RATE_LIMIT_WINDOW_MS);
 
-    // Clean old timestamps
-    this.requestTimestamps = this.requestTimestamps.filter(
-      (ts) => now - ts < RATE_LIMIT_WINDOW_MS
-    );
-
-    // Check if we've hit the rate limit
     if (this.requestTimestamps.length >= RATE_LIMIT_REQUESTS) {
-      const oldestTimestamp = this.requestTimestamps[0];
-      const waitTime = RATE_LIMIT_WINDOW_MS - (now - oldestTimestamp);
-      if (waitTime > 0) {
-        logger.info(`Rate limit reached, waiting ${waitTime}ms`);
-        await this.sleep(waitTime);
+      const wait = RATE_LIMIT_WINDOW_MS - (now - this.requestTimestamps[0]);
+      if (wait > 0) {
+        logger.info('Rate limit reached, waiting', { waitMs: wait });
+        await this.sleep(wait);
       }
     }
 
-    // Add random delay between requests
-    const timeSinceLastRequest = now - this.lastRequestTime;
-    const randomDelay = MIN_DELAY_MS + Math.random() * (MAX_DELAY_MS - MIN_DELAY_MS);
-    if (timeSinceLastRequest < randomDelay) {
-      await this.sleep(randomDelay - timeSinceLastRequest);
-    }
+    const sinceLast = Date.now() - this.lastRequestTime;
+    const jitter = MIN_DELAY_MS + Math.random() * Math.max(0, MAX_DELAY_MS - MIN_DELAY_MS);
+    if (sinceLast < jitter) await this.sleep(jitter - sinceLast);
 
     this.requestTimestamps.push(Date.now());
     this.lastRequestTime = Date.now();
   }
 
-  private sleep(ms: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, ms));
-  }
-
-  async request<T>(config: HttpRequestConfig): Promise<T> {
-    await this.waitForRateLimit();
-
-    const cookieString = await sessionService.getCookieString();
+  async send(request: BuiltRequest, opts: { withAuth: boolean } = { withAuth: true }): Promise<HttpResult> {
+    await this.throttle();
 
     const headers: Record<string, string> = {
-      'User-Agent': DEFAULT_USER_AGENT,
-      Accept: 'application/json, text/plain, */*',
-      'Accept-Language': 'fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7',
-      'Accept-Encoding': 'gzip, deflate, br',
-      Connection: 'keep-alive',
-      'Sec-Fetch-Dest': 'empty',
-      'Sec-Fetch-Mode': 'cors',
-      'Sec-Fetch-Site': 'same-origin',
-      ...config.headers,
+      'user-agent': DEFAULT_USER_AGENT,
+      accept: 'application/json, text/plain, */*',
+      'accept-language': 'fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7',
+      referer: 'https://www.carrefour.fr/',
+      origin: 'https://www.carrefour.fr',
+      ...request.headers,
     };
 
-    if (cookieString) {
-      headers['Cookie'] = cookieString;
+    if (opts.withAuth) {
+      const cookie = sessionService.getCookieHeader(request.url);
+      if (cookie) headers.cookie = cookie;
     }
 
-    if (config.body && config.method !== 'GET') {
-      headers['Content-Type'] = 'application/json';
-    }
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
 
-    const fetchConfig: RequestInit = {
-      method: config.method,
-      headers,
-      body: config.body ? JSON.stringify(config.body) : undefined,
-    };
-
-    logger.info(`HTTP ${config.method} ${config.url}`);
+    logger.info('HTTP request', { method: request.method, url: request.url });
 
     try {
-      const controller = new AbortController();
-      const timeout = config.timeout || 30000;
-      const timeoutId = setTimeout(() => controller.abort(), timeout);
-
-      const response = await fetch(config.url, {
-        ...fetchConfig,
+      const response = await fetch(request.url, {
+        method: request.method,
+        headers,
+        body: request.body as BodyInit | undefined,
         signal: controller.signal,
+        redirect: 'follow',
       });
 
-      clearTimeout(timeoutId);
-
-      // Update session cookies from response if present
-      const setCookieHeader = response.headers.get('set-cookie');
-      if (setCookieHeader) {
-        await this.handleSetCookie(setCookieHeader);
-      }
+      sessionService.storeSetCookies(getSetCookies(response.headers), request.url);
 
       const contentType = response.headers.get('content-type');
-      let data: T;
-
-      if (contentType?.includes('application/json')) {
-        data = (await response.json()) as T;
-      } else {
-        data = (await response.text()) as unknown as T;
-      }
-
-      if (!response.ok) {
-        logger.error(`HTTP error: ${response.status} ${response.statusText}`);
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-      }
-
-      await sessionService.updateLastUsed();
-      return data;
-    } catch (error) {
-      if (error instanceof Error && error.name === 'AbortError') {
-        throw new Error('Request timeout');
-      }
-      logger.error('HTTP request failed:', error);
-      throw error;
-    }
-  }
-
-  private async handleSetCookie(setCookieHeader: string): Promise<void> {
-    try {
-      const existingCookies = (await sessionService.getCookies()) || {};
-      const newCookies = { ...existingCookies };
-
-      // Parse Set-Cookie header (simplified)
-      const cookieParts = setCookieHeader.split(',');
-      for (const part of cookieParts) {
-        const [cookiePair] = part.split(';');
-        const [name, value] = cookiePair.trim().split('=');
-        if (name && value) {
-          newCookies[name] = value;
+      const text = await response.text();
+      let data: unknown = text;
+      if (contentType?.includes('json')) {
+        try {
+          data = JSON.parse(text);
+        } catch {
+          data = text;
         }
       }
 
-      await sessionService.setCookies(newCookies);
+      logger.info('HTTP response', { status: response.status, url: request.url });
+
+      return {
+        status: response.status,
+        statusText: response.statusText,
+        ok: response.ok,
+        url: response.url || request.url,
+        contentType,
+        data,
+      };
     } catch (error) {
-      logger.error('Failed to handle Set-Cookie header:', error);
+      if (error instanceof Error && error.name === 'AbortError') {
+        throw new Error(`Request timed out after ${TIMEOUT_MS}ms: ${request.method} ${request.url}`);
+      }
+      logger.error('HTTP request failed', { error: String(error), url: request.url });
+      throw error;
+    } finally {
+      clearTimeout(timer);
     }
-  }
-
-  async get<T>(url: string, headers?: Record<string, string>): Promise<T> {
-    return this.request<T>({ method: 'GET', url, headers });
-  }
-
-  async post<T>(url: string, body?: unknown, headers?: Record<string, string>): Promise<T> {
-    return this.request<T>({ method: 'POST', url, body, headers });
-  }
-
-  async put<T>(url: string, body?: unknown, headers?: Record<string, string>): Promise<T> {
-    return this.request<T>({ method: 'PUT', url, body, headers });
-  }
-
-  async delete<T>(url: string, headers?: Record<string, string>): Promise<T> {
-    return this.request<T>({ method: 'DELETE', url, headers });
-  }
-
-  async patch<T>(url: string, body?: unknown, headers?: Record<string, string>): Promise<T> {
-    return this.request<T>({ method: 'PATCH', url, body, headers });
   }
 }
 

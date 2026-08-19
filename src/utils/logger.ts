@@ -1,8 +1,34 @@
 import winston from 'winston';
-import { join, dirname } from 'path';
+import { mkdirSync } from 'fs';
+import { join, dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+
+const LOG_DIR = process.env.CARREFOUR_LOG_DIR
+  ? resolve(process.env.CARREFOUR_LOG_DIR)
+  : join(__dirname, '..', '..', 'data');
+
+const transports: winston.transport[] = [];
+
+try {
+  mkdirSync(LOG_DIR, { recursive: true });
+  transports.push(
+    new winston.transports.File({ filename: join(LOG_DIR, 'error.log'), level: 'error' }),
+    new winston.transports.File({ filename: join(LOG_DIR, 'combined.log') })
+  );
+} catch {
+  // Read-only install: fall back to stderr only.
+}
+
+// NEVER log to stdout: stdout is the MCP stdio transport.
+transports.push(
+  new winston.transports.Stream({
+    stream: process.stderr,
+    level: process.env.LOG_LEVEL || 'error',
+    format: winston.format.simple(),
+  })
+);
 
 export const logger = winston.createLogger({
   level: process.env.LOG_LEVEL || 'info',
@@ -12,27 +38,5 @@ export const logger = winston.createLogger({
     winston.format.json()
   ),
   defaultMeta: { service: 'carrefour-drive-mcp' },
-  transports: [
-    new winston.transports.File({
-      filename: join(__dirname, '../../data/error.log'),
-      level: 'error',
-    }),
-    new winston.transports.File({
-      filename: join(__dirname, '../../data/combined.log'),
-    }),
-  ],
+  transports,
 });
-
-// In development, also log to console
-if (process.env.NODE_ENV !== 'production') {
-  logger.add(
-    new winston.transports.Console({
-      format: winston.format.combine(
-        winston.format.colorize(),
-        winston.format.simple()
-      ),
-      // Only log errors to console to avoid polluting MCP stdio
-      level: 'error',
-    })
-  );
-}
