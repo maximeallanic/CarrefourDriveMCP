@@ -6,7 +6,7 @@ import { registerSpecTools } from './spec/register.js';
 import { loadToolSpecs } from './spec/loader.js';
 import { registerSessionTools } from './tools/session.tools.js';
 import { startKeepAlive } from './services/auth.service.js';
-import { browserService } from './services/browser.service.js';
+import { transport } from './services/browser.service.js';
 import { logger } from './utils/logger.js';
 
 config();
@@ -44,7 +44,7 @@ async function main(): Promise<void> {
   // The browser is a child process; leaving it behind would lock the profile.
   for (const signal of ['SIGINT', 'SIGTERM'] as const) {
     process.once(signal, () => {
-      browserService.close().finally(() => process.exit(0));
+      transport.close().finally(() => process.exit(0));
     });
   }
 }

@@ -270,6 +270,27 @@ It runs **windowless**, but not in standard headless mode:
 
 The last line is what ships.
 
+### Lent-browser mode (an agent host lends its own browser)
+
+When the agent that starts this server already drives a browser of its own, with your session in
+it, it can lend that browser instead: it sets `ENGINE_BROWSER_SOCKET` (a unix socket) and
+`ENGINE_BROWSER_TOKEN` (a secret, required on every line) in the server's environment, and then:
+
+- no Chromium is launched and `playwright` is never loaded — it is an optional dependency, and
+  `postinstall` downloads Chromium only when it will be used (skip it with
+  `CARREFOUR_SKIP_BROWSER_DOWNLOAD=1`, or `npm install --omit=optional`);
+- no cookie is kept on disk, and no log file is written: every request is run by the host in a page
+  of its browser, under the host's rules (allowed hosts, pacing). The server only ever sees the
+  **names** of the cookies the host holds, to know whether a session and an SSO cookie exist;
+- `carrefour_set_cookies`, `carrefour_clear_session` and `carrefour_browser_login` are not
+  registered — the session is the host's — and neither are `validate_checkout_slot`,
+  `validate_checkout_summary` and `submit_checkout_payment`: the agent stops at a ready cart and a
+  chosen slot, and you validate and pay yourself;
+- when the session expires, the tools say to export it again from your browser for the host.
+
+The protocol is JSON lines, documented in [`src/services/bridge.protocol.ts`](src/services/bridge.protocol.ts).
+Without the variable, nothing changes.
+
 ## How authentication works
 
 Two distinct cookie systems:

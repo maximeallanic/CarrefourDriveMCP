@@ -1,6 +1,6 @@
 import type { BuiltRequest } from '../spec/types.js';
 import { sessionService } from './session.service.js';
-import { browserService, type FetchRequest } from './browser.service.js';
+import { transport, type FetchRequest } from './browser.service.js';
 import { refreshSession } from './auth.service.js';
 import { logger } from '../utils/logger.js';
 
@@ -57,10 +57,11 @@ class HttpService {
    */
   async send(request: BuiltRequest, opts: { withAuth: boolean } = { withAuth: true }): Promise<HttpResult> {
     if (!opts.withAuth) return this.execute(request, false);
+    await sessionService.ready();
 
     // Nothing usable for this host yet, but a renewable SSO session: rebuild first
     // rather than spending a request we know will come back 401.
-    if (!sessionService.getCookieHeader(request.url) && sessionService.hasSso()) {
+    if (!sessionService.hasCookiesFor(request.url) && sessionService.hasSso()) {
       await refreshSession();
     }
 
@@ -103,7 +104,7 @@ class HttpService {
 
     logger.info('HTTP request', { method: request.method, url: request.url, withAuth });
 
-    const response = await browserService.fetch(call);
+    const response = await transport.fetch(call);
 
     let data: unknown = response.text;
     if (response.contentType?.includes('json')) {

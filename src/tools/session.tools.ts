@@ -2,7 +2,7 @@ import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import {
   sessionService,
-  NO_SESSION_MESSAGE,
+  noSessionMessage,
   CARREFOUR_ORIGIN,
   IAM_ORIGIN,
   SSO_COOKIE_NAME,
@@ -10,7 +10,8 @@ import {
 import { httpService } from '../services/http.service.js';
 import { refreshSession, ssoStatus } from '../services/auth.service.js';
 import { browserLogin, isPlaywrightAvailable } from '../services/browser-login.js';
-import { browserService } from '../services/browser.service.js';
+import { browserService, transport } from '../services/browser.service.js';
+import { lentMode } from '../services/bridge.protocol.js';
 
 function humanDuration(seconds: number): string {
   const h = Math.floor(seconds / 3600);
@@ -25,8 +26,13 @@ function text(body: string, isError = false) {
 /** Endpoint used as a cheap "am I logged in?" probe. */
 const PROBE_URL = `${CARREFOUR_ORIGIN}/api/user/secured/loyalty/balance`;
 
-export function registerSessionTools(server: McpServer): void {
-  server.tool(
+/**
+ * In the lent-browser mode (`bridge.protocol.ts`) the session belongs to the host: the tools that
+ * set, clear or sign it in by hand are not registered. Status and refresh stay.
+ */
+export function registerSessionTools(server: McpServer, opts: { lent?: boolean } = {}): void {
+  const lent = opts.lent ?? lentMode();
+  if (!lent) server.tool(
     'carrefour_set_cookies',
     'Store your www.carrefour.fr session cookies so the other tools can act on your account. ' +
       'Accepts a raw cookie header ("a=1; b=2"), a JSON map, or a JSON array export ' +
@@ -61,13 +67,15 @@ export function registerSessionTools(server: McpServer): void {
         .describe('If true, performs one authenticated request to check the session is still valid.'),
     },
     async ({ verify }) => {
+      await sessionService.ready();
       const status = sessionService.status();
-      if (!status.authenticated && !status.sso) return text(NO_SESSION_MESSAGE, true);
+      if (!status.authenticated && !status.sso) return text(noSessionMessage(), true);
 
-      const browser = browserService.describe();
-      let line =
-        `Session present: ${status.cookieCount} cookie(s) [${status.cookies.join(', ')}]\n` +
-        `File: ${status.sessionFile}\nBrowser profile: ${browser.profile} (${browser.running ? 'running' : 'stopped'})`;
+      const browser = transport.describe();
+      let line = sessionService.isLent()
+        ? `Session held by the host: ${status.cookieCount} cookie(s) [${status.cookies.join(', ')}] — names only, the values stay with the host.`
+        : `Session present: ${status.cookieCount} cookie(s) [${status.cookies.join(', ')}]\n` +
+          `File: ${status.sessionFile}\nBrowser profile: ${browser.profile} (${browser.running ? 'running' : 'stopped'})`;
 
       const sso = await ssoStatus();
       if (!sso.present) {
@@ -113,14 +121,14 @@ export function registerSessionTools(server: McpServer): void {
     }
   );
 
-  server.tool('carrefour_clear_session', 'Delete the locally stored Carrefour cookies.', {}, async () => {
+  if (!lent) server.tool('carrefour_clear_session', 'Delete the locally stored Carrefour cookies.', {}, async () => {
     await browserService.close();
     sessionService.clear();
     return text('Session cleared. Provide cookies again with carrefour_set_cookies before using account tools.');
   });
 
   // Optional convenience: only exposed when playwright happens to be installed.
-  if (isPlaywrightAvailable()) {
+  if (!lent && isPlaywrightAvailable()) {
     server.tool(
       'carrefour_browser_login',
       'Opens a browser window on the server profile so you can sign in to carrefour.fr. ' +

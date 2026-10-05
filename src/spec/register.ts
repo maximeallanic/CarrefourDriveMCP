@@ -4,7 +4,8 @@ import { schemaToZodShape } from './params.js';
 import type { ToolSpec } from './types.js';
 import { loadToolSpecs, type LoadResult } from './loader.js';
 import { httpService } from '../services/http.service.js';
-import { sessionService, NO_SESSION_MESSAGE } from '../services/session.service.js';
+import { sessionService, noSessionMessage } from '../services/session.service.js';
+import { lentMode } from '../services/bridge.protocol.js';
 import { logger } from '../utils/logger.js';
 
 const MAX_RESPONSE_CHARS = parseInt(process.env.CARREFOUR_MAX_RESPONSE_CHARS || '60000', 10);
@@ -29,8 +30,9 @@ function render(data: unknown): string {
 export async function executeSpec(spec: ToolSpec, args: Record<string, unknown>): Promise<ToolResult> {
   // An SSO cookie alone is enough: httpService rebuilds the storefront session
   // before the request goes out.
+  await sessionService.ready();
   if (spec.requires_auth && !sessionService.hasSession() && !sessionService.hasSso()) {
-    return text(NO_SESSION_MESSAGE, true);
+    return text(noSessionMessage(), true);
   }
 
   let request;
@@ -48,7 +50,7 @@ export async function executeSpec(spec: ToolSpec, args: Record<string, unknown>)
       // reaching here means the session is really gone.
       return text(
         `Carrefour returned ${result.status} for ${spec.name}. The session is expired and could not be ` +
-          `renewed automatically.\n\n${NO_SESSION_MESSAGE}`,
+          `renewed automatically.\n\n${noSessionMessage()}`,
         true
       );
     }
@@ -68,11 +70,28 @@ export async function executeSpec(spec: ToolSpec, args: Record<string, unknown>)
 }
 
 /**
+ * Not registered in the lent-browser mode: validating a checkout only makes sense right before a
+ * payment, and a host that lends its owner's browser stops at a ready cart and a chosen slot — the
+ * owner validates and pays himself.
+ */
+export const NOT_LENT_SPECS: ReadonlySet<string> = new Set([
+  'validate_checkout_slot',
+  'validate_checkout_summary',
+  'submit_checkout_payment',
+]);
+
+/**
  * Register every JSON-declared tool on the MCP server.
  * All 43 endpoints are served by this one generic executor.
  */
-export function registerSpecTools(server: McpServer, load: LoadResult = loadToolSpecs()): LoadResult {
+export function registerSpecTools(
+  server: McpServer,
+  load: LoadResult = loadToolSpecs(),
+  opts: { lent?: boolean } = {}
+): LoadResult {
+  const lent = opts.lent ?? lentMode();
   for (const spec of load.specs) {
+    if (lent && NOT_LENT_SPECS.has(spec.name)) continue;
     const shape = schemaToZodShape(spec.parameters);
     const description = spec.requires_auth
       ? `${spec.description} (requires an authenticated Carrefour session)`

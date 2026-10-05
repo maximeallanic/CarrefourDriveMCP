@@ -3,6 +3,13 @@ import { dirname, resolve } from 'path';
 import { CookieJar, Cookie } from 'tough-cookie';
 import { logger } from '../utils/logger.js';
 import { dataPath } from '../utils/paths.js';
+import { lentMode } from './bridge.protocol.js';
+import { hostBrowser } from './host-browser.js';
+
+/** Where the lent-browser mode reads which cookies the host holds: their names, never a value. */
+export interface CookieNamesSource {
+  cookieNames(origin: string): Promise<string[]>;
+}
 
 export const CARREFOUR_ORIGIN = 'https://www.carrefour.fr';
 /** ForgeRock AM lives on its own host and holds the SSO session. */
@@ -80,11 +87,48 @@ export function parseCookieInput(input: string): CookieInput[] {
 export class SessionService {
   private jar = new CookieJar();
   private loaded = false;
+  /**
+   * Lent-browser mode (`bridge.protocol.ts`): the session is the host's. No jar is read or written,
+   * and what is known of the session is the cookie NAMES the host holds per origin, refreshed by
+   * `ready()` — enough for `hasSession()` and `hasSso()`, never a value.
+   */
+  private readonly host: CookieNamesSource | null;
+  private hostNames = new Map<string, string[]>();
+
+  constructor(opts: { host?: CookieNamesSource | null } = {}) {
+    this.host = opts.host ?? null;
+  }
+
+  isLent(): boolean {
+    return this.host !== null;
+  }
+
+  /** Lent mode: asks the host which cookies it holds for the storefront and the SSO. Otherwise nothing to do. */
+  async ready(): Promise<void> {
+    if (!this.host) return;
+    for (const origin of [CARREFOUR_ORIGIN, IAM_ORIGIN]) {
+      this.hostNames.set(origin, await this.host.cookieNames(origin));
+    }
+  }
+
+  private namesFor(url: string): string[] {
+    try {
+      return this.hostNames.get(new URL(url).origin) ?? [];
+    } catch {
+      return [];
+    }
+  }
+
+  /** Whether any cookie is held for `url` — the only thing a cookie header was used to decide. */
+  hasCookiesFor(url: string = CARREFOUR_ORIGIN): boolean {
+    return this.host ? this.namesFor(url).length > 0 : this.getCookieHeader(url).length > 0;
+  }
 
   /** Load the persisted jar, then layer any env-provided cookies on top. */
   private ensureLoaded(): void {
     if (this.loaded) return;
     this.loaded = true;
+    if (this.host) return;
 
     const file = sessionFile();
     if (existsSync(file)) {
@@ -119,6 +163,7 @@ export class SessionService {
 
   /** Add cookies from any supported input format. Returns how many were stored. */
   importCookies(input: string, persist = true): number {
+    if (this.host) return 0;
     this.ensureLoaded();
     const cookies = parseCookieInput(input);
     let stored = 0;
@@ -157,6 +202,7 @@ export class SessionService {
     expires?: number;
   }> {
     this.ensureLoaded();
+    if (this.host) return [];
     const out = [];
     for (const origin of [CARREFOUR_ORIGIN, IAM_ORIGIN]) {
       for (const cookie of this.jar.getCookiesSync(origin)) {
@@ -178,6 +224,7 @@ export class SessionService {
 
   /** Serialize the jar to disk with owner-only permissions. */
   persist(): void {
+    if (this.host) return;
     const file = sessionFile();
     try {
       mkdirSync(dirname(file), { recursive: true });
@@ -200,7 +247,7 @@ export class SessionService {
 
   /** Fold `Set-Cookie` response headers back into the jar. */
   storeSetCookies(setCookies: string[], url: string): void {
-    if (setCookies.length === 0) return;
+    if (setCookies.length === 0 || this.host) return;
     this.ensureLoaded();
     for (const raw of setCookies) {
       try {
@@ -213,11 +260,12 @@ export class SessionService {
   }
 
   hasSession(): boolean {
-    return this.getCookieHeader().length > 0;
+    return this.hasCookiesFor(CARREFOUR_ORIGIN);
   }
 
   /** The SSO token is what lets us rebuild an expired storefront session. */
   getSsoToken(): string | null {
+    if (this.host) return null;
     this.ensureLoaded();
     try {
       const found = this.jar.getCookiesSync(IAM_ORIGIN).find((c) => c.key === SSO_COOKIE_NAME);
@@ -229,10 +277,12 @@ export class SessionService {
   }
 
   hasSso(): boolean {
+    if (this.host) return this.namesFor(IAM_ORIGIN).includes(SSO_COOKIE_NAME);
     return this.getSsoToken() !== null;
   }
 
   cookieNames(url: string = CARREFOUR_ORIGIN): string[] {
+    if (this.host) return [...this.namesFor(url)].sort();
     this.ensureLoaded();
     return this.jar
       .getCookiesSync(url)
@@ -241,6 +291,7 @@ export class SessionService {
   }
 
   clear(): void {
+    if (this.host) return;
     this.jar = new CookieJar();
     this.loaded = true;
     const file = sessionFile();
@@ -266,12 +317,25 @@ export class SessionService {
       cookieCount: cookies.length,
       cookies,
       sso: this.hasSso(),
-      sessionFile: sessionFile(),
+      sessionFile: this.host ? 'held by the host' : sessionFile(),
     };
   }
 }
 
-export const sessionService = new SessionService();
+export const sessionService = new SessionService(lentMode() ? { host: hostBrowser() } : {});
+
+/** What a tool says when no session can be used — in the lent mode, the session is the host's to renew. */
+export const LENT_NO_SESSION_MESSAGE = [
+  'No Carrefour session is held by the host that lends this server its browser, or it has expired.',
+  '',
+  'Ask the account owner to export his carrefour.fr session again from his own browser (www.carrefour.fr',
+  `and moncompte.carrefour.fr, including the '${SSO_COOKIE_NAME}' cookie); the host records it with`,
+  'browser.add_identity, under the identity lent to this server.',
+].join('\n');
+
+export function noSessionMessage(session: SessionService = sessionService): string {
+  return session.isLent() ? LENT_NO_SESSION_MESSAGE : NO_SESSION_MESSAGE;
+}
 
 export const NO_SESSION_MESSAGE = [
   'No Carrefour session available.',

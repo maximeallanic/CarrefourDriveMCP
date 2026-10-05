@@ -2,6 +2,7 @@ import winston from 'winston';
 import { mkdirSync } from 'fs';
 import { join, resolve } from 'path';
 import { dataDir } from './paths.js';
+import { lentMode } from '../services/bridge.protocol.js';
 
 const LOG_DIR = process.env.CARREFOUR_LOG_DIR
   ? resolve(process.env.CARREFOUR_LOG_DIR)
@@ -9,7 +10,9 @@ const LOG_DIR = process.env.CARREFOUR_LOG_DIR
 
 const transports: winston.transport[] = [];
 
-try {
+// In the lent-browser mode nothing of the session is kept here, the logs (urls, queries) included:
+// stderr only, which the host reads.
+if (!lentMode()) try {
   mkdirSync(LOG_DIR, { recursive: true });
   transports.push(
     new winston.transports.File({ filename: join(LOG_DIR, 'error.log'), level: 'error' }),

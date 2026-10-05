@@ -4,6 +4,8 @@ import type { BrowserContext, Page } from 'playwright';
 import { sessionService } from './session.service.js';
 import { logger } from '../utils/logger.js';
 import { dataPath } from '../utils/paths.js';
+import { lentMode } from './bridge.protocol.js';
+import { hostBrowser } from './host-browser.js';
 
 /**
  * All Carrefour traffic goes through a real Chromium.
@@ -254,3 +256,18 @@ class BrowserService {
 }
 
 export const browserService = new BrowserService();
+
+/** What the tools send their requests through: this server's own Chromium, or the host's (`host-browser.ts`). */
+export interface BrowserTransport {
+  fetch(request: FetchRequest): Promise<FetchResponse>;
+  navigate(url: string): Promise<{ status: number | null; finalUrl: string }>;
+  syncCookies(): Promise<void>;
+  close(): Promise<void>;
+  describe(): { running: boolean; headed: boolean; profile: string };
+}
+
+/**
+ * The lent-browser mode (ENGINE_BROWSER_SOCKET set, `bridge.protocol.ts`): the host's browser, and
+ * `playwright` is never loaded. Without the variable, nothing changes.
+ */
+export const transport: BrowserTransport = lentMode() ? hostBrowser() : browserService;

@@ -1,5 +1,5 @@
 import { CARREFOUR_ORIGIN, IAM_ORIGIN, SessionService, sessionService } from './session.service.js';
-import { browserService } from './browser.service.js';
+import { transport } from './browser.service.js';
 import { logger } from '../utils/logger.js';
 
 /**
@@ -54,21 +54,28 @@ function landedOnStorefront(finalUrl: string): boolean {
   }
 }
 
+/** In the lent-browser mode the session is the host's: the way back is a fresh export, recorded by the host. */
+const LENT_SIGN_IN_AGAIN =
+  'Ask the account owner to export his carrefour.fr session again from his own browser; the host ' +
+  'records it with browser.add_identity, under the identity lent to this server.';
+
 async function doRefresh(session: SessionService): Promise<RefreshResult> {
+  await session.ready();
   if (!session.hasSso()) {
     return {
       ok: false,
       reason: 'no-sso',
-      message:
-        'No IAM SSO cookie (c4iamsecuretk) in the browser profile, so the storefront session ' +
-        'cannot be rebuilt. Run carrefour_browser_login to sign in again.',
+      message: session.isLent()
+        ? `The host holds no IAM SSO cookie (c4iamsecuretk) for this server, so the storefront session cannot be rebuilt. ${LENT_SIGN_IN_AGAIN}`
+        : 'No IAM SSO cookie (c4iamsecuretk) in the browser profile, so the storefront session ' +
+          'cannot be rebuilt. Run carrefour_browser_login to sign in again.',
     };
   }
 
   let landing: { status: number | null; finalUrl: string };
   try {
     // Chromium walks the redirect chain and stores the cookies itself.
-    landing = await browserService.navigate(authorizeUrl());
+    landing = await transport.navigate(authorizeUrl());
   } catch (error) {
     logger.error('Session refresh failed', { error: String(error) });
     return { ok: false, reason: 'network', message: `Session refresh failed: ${(error as Error).message}` };
@@ -79,10 +86,11 @@ async function doRefresh(session: SessionService): Promise<RefreshResult> {
     return {
       ok: false,
       reason: 'sso-expired',
-      message:
-        'The IAM SSO session is no longer valid (it expires after 60 min idle, 24 h max), so no ' +
-        'authorization code was issued. Sign in again with carrefour_browser_login — Carrefour ' +
-        'requires a captcha and an email OTP, which cannot be scripted.',
+      message: session.isLent()
+        ? `The IAM SSO session is no longer valid (it expires after 60 min idle, 24 h max), so no authorization code was issued. ${LENT_SIGN_IN_AGAIN}`
+        : 'The IAM SSO session is no longer valid (it expires after 60 min idle, 24 h max), so no ' +
+          'authorization code was issued. Sign in again with carrefour_browser_login — Carrefour ' +
+          'requires a captcha and an email OTP, which cannot be scripted.',
     };
   }
 
@@ -117,10 +125,11 @@ export interface SsoStatus {
 
 /** Ask ForgeRock how much life is left in the SSO session. */
 export async function ssoStatus(session: SessionService = sessionService): Promise<SsoStatus> {
+  await session.ready();
   if (!session.hasSso()) return { present: false };
 
   const call = async (action: string): Promise<Record<string, number> | null> => {
-    const response = await browserService.fetch({
+    const response = await transport.fetch({
       method: 'POST',
       url: `${IAM_ORIGIN}/iam/json/sessions/?_action=${action}`,
       headers: {
@@ -165,9 +174,11 @@ export function startKeepAlive(session: SessionService = sessionService): void {
   if (!Number.isFinite(minutes) || minutes <= 0 || keepAliveTimer) return;
 
   keepAliveTimer = setInterval(() => {
-    if (!session.hasSso()) return;
-    refreshSession(session)
-      .then((result) => logger.info('Keep-alive', { ok: result.ok, reason: result.reason }))
+    // Lent mode: which cookies the host holds is asked first — the jar is not here to read.
+    session
+      .ready()
+      .then(() => (session.hasSso() ? refreshSession(session) : null))
+      .then((result) => result && logger.info('Keep-alive', { ok: result.ok, reason: result.reason }))
       .catch((error) => logger.error('Keep-alive failed', { error: String(error) }));
   }, minutes * 60_000);
 

@@ -10,6 +10,7 @@
   "files": [
     "dist",
     "tools",
+    "scripts/postinstall.mjs",
     "README.md",
     "LICENSE"
   ],
@@ -20,7 +21,7 @@
     "test": "npm run build && node --test 'dist/__tests__/*.test.js'",
     "smoke": "npm run build && node scripts/smoke.mjs",
     "verify": "npm run build && node --test 'dist/__tests__/*.test.js' && node scripts/smoke.mjs",
-    "postinstall": "playwright install chromium",
+    "postinstall": "node scripts/postinstall.mjs",
     "prepare": "tsc",
     "prepublishOnly": "npm test"
   },
@@ -52,7 +53,9 @@
     "dotenv": "^16.4.5",
     "tough-cookie": "^4.1.4",
     "zod": "^3.24.0",
-    "winston": "^3.13.0",
+    "winston": "^3.13.0"
+  },
+  "optionalDependencies": {
     "playwright": "^1.50.0"
   },
   "devDependencies": {
