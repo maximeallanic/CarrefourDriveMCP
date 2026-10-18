@@ -1,38 +1,31 @@
 {
   "name": "get_products_by_gtins",
-  "description": "Retrieves product details for a list of GTINs (barcodes/EANs) from Carrefour France, optionally scoped to a specific facility/store service. Returns product details including EAN, title, brand, category, images, business type, and links for each matching product. Useful for bulk product lookups by barcode.",
+  "description": "Looks up one product by its GTIN (barcode/EAN) on Carrefour France through the site search (GET /s?q=<GTIN>, JSON). Returns the matching product with EAN, title, brand, slug, categories, images, business type, offerServiceId and offers. One GTIN per call: several GTINs in one query turn into a text search and return unrelated products.",
   "parameters": {
     "type": "object",
     "properties": {
-      "gtins": {
-        "type": "array",
-        "description": "List of GTINs (EAN/barcode strings) identifying the products to retrieve."
-      },
-      "facilityServiceId": {
+      "gtin": {
         "type": "string",
-        "description": "The facility/store service ID to scope product availability and offers (e.g. '0678-150-7052')."
+        "description": "The GTIN (EAN/barcode string) identifying the product to retrieve."
       }
     },
     "required": [
-      "gtins"
+      "gtin"
     ]
   },
   "request": {
-    "method": "POST",
-    "url": "https://www.carrefour.fr/products",
+    "method": "GET",
+    "url": "https://www.carrefour.fr/s",
     "headers": {
-      "accept": "application/json",
-      "content-type": "application/json"
+      "accept": "application/json, text/plain, */*",
+      "x-requested-with": "XMLHttpRequest"
     },
-    "query": {},
-    "body": {
-      "gtins": {
-        "$param": "gtins"
-      },
-      "facilityServiceId": {
-        "$param": "facilityServiceId"
+    "query": {
+      "q": {
+        "$param": "gtin"
       }
     },
+    "body": null,
     "content_type": "application/json"
   },
   "requires_auth": false,

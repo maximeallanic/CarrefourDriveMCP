@@ -182,7 +182,7 @@ re-injected into the browser profile on every start.
 | --- | --- | --- |
 | `search_products` | GET /s | `q` |
 | `autocomplete_search` | GET /autocomplete | `q` |
-| `get_products_by_gtins` | POST /products | `gtins` |
+| `get_products_by_gtins` | GET /s | `gtin` |
 | `get_products_by_query` | GET /products/query/{query_id} | `query_id` |
 | `get_product_reviews` | GET /product/{ean}/reviews | `ean` |
 | `get_navigation_tree` | GET /navigation | — |

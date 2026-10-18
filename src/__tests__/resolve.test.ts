@@ -122,6 +122,14 @@ test('get_delivery_timeslots: GET with query and no body', () => {
   assert.equal(req.headers['content-type'], undefined);
 });
 
+test('get_products_by_gtins: looks the GTIN up through GET /s, never POST /products', () => {
+  const req = buildRequest(spec('get_products_by_gtins'), { gtin: '3000000033272' });
+  assert.equal(req.method, 'GET');
+  assert.equal(req.url, 'https://www.carrefour.fr/s?q=3000000033272');
+  assert.equal(req.body, undefined);
+  assert.equal(req.headers['x-requested-with'], 'XMLHttpRequest');
+});
+
 test('validate_checkout_slot: URL segment substitution plus JSON body', () => {
   const req = buildRequest(spec('validate_checkout_slot'), {
     basket_service_type: 'driveclcv',
